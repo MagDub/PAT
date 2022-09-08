@@ -1,0 +1,1158 @@
+---
+title: "PAT data analysis"
+author: "Magda Dubois"
+date: "11/04/2022"
+output:
+    html_document: default
+    pdf_document: default
+#output: bookdown::html_document2
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# R and python setup
+library(reticulate)
+#py_install("pandas")
+#py_install("numpy")
+#py_install("seaborn")
+#py_install("ptitprince")
+#py_install("Jinja2")
+#output: bookdown::html_document2
+```
+
+```{python, echo=FALSE}
+# Python setup
+import pickle
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import ptitprince as pt
+import math
+from scipy import stats
+from scipy.stats import pearsonr
+
+# data folder
+all_users_folder = './data_analysis/data/all_users/'
+
+# Load data
+all_counts = pd.read_pickle(all_users_folder + 'all_counts.pkl');
+Npart = len(set(all_counts['ID']))
+
+# Task details for 1 part
+data_single_part = all_counts[all_counts['ID']=='001']
+Ntrials = data_single_part[['FB_-5', 'FB_-1', 'FB_1', 'FB_5', 'FB_no_-5', 'FB_no_-1', 'FB_no_1', 'FB_no_5']].sum(axis=1)
+Ntrials_percue = Ntrials[0]
+Ntrials_total = Ntrials.sum()
+
+cue_freqs = data_single_part[['Cue', 'R_-5', 'R_-1', 'R_1', 'R_5']]
+
+# Compute number of hits and make new column
+all_counts['Hits'] = all_counts[['FB_-5', 'FB_-1', 'FB_1', 'FB_5']].sum(axis=1)
+
+tmp_data_std = all_counts.groupby('Cue').std().reindex(['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR']);
+```
+
+```{python, echo=FALSE}
+# Functions
+
+def print_model_info(mod):
+    file_name = all_users_folder+'mod' + str(mod) + '/mod_parameters.pkl'
+    
+    with open(file_name, 'rb') as f:
+        mod_info = pickle.load(f)
+        
+    print('Model = ' + mod_info['name'] 
+    + '\nValue function = ' + mod_info['value_fct']
+    + '\nDecision function = ' + mod_info['dec_fct']
+    + '\nParameters = ' + ', '.join(mod_info['param_names']))
+    
+    return mod_info
+
+
+def print_model_stats(mod):
+    
+    model_folder = all_users_folder + 'mod' + str(mod) + '/'
+    data_mod = pd.read_pickle(model_folder + 'mod_param_fits.pkl')
+    mod_info = pd.read_pickle(model_folder + 'mod_parameters.pkl')
+    data_mod_num = data_mod.apply(pd.to_numeric)
+    dfstats=data_mod_num.drop('ID', axis=1).describe()
+    
+    if len(dfstats.columns) <= 6:
+        print(dfstats)
+    else:
+        print(dfstats.iloc[:,0:3])
+        print(dfstats.iloc[:,3::])
+    
+    return model_folder, data_mod, data_mod_num
+    
+
+def plot_correlation(title, x, y, data, ax, text_pos, xlabel, ylabel, xlim, ylim):
+        
+    # Initialise figue
+    ax.set_title(title, fontsize = 22)
+
+    # Scatter plot
+    sns.scatterplot( x = x, y = y, data = data, ax = ax);
+
+    # Linear regression line
+    sns.regplot(x = x, y = y, data = data, ax = ax);
+    
+    # Plot horizontal line
+    ax.axhline(y=0, color='k', linestyle=':')
+
+    # Compute correlation stats (r and p values)
+    r, p = pearsonr(data[x], data[y])
+    
+    # Write stats on fig
+    if p<0.01:
+        ax.text(text_pos[0], text_pos[1], 'r={:.2f} \np<0.01'.format(r, p), transform=ax.transAxes, fontsize=16)
+    else:    
+        ax.text(text_pos[0], text_pos[1], 'r={:.2f} \np={:.2g}'.format(r, p), transform=ax.transAxes, fontsize=16)
+    
+    # Properties
+    ax.set_ylabel(ylabel, fontsize=15)
+    ax.set_ylim(bottom=ylim[0], top=ylim[1])
+    
+    ax.set_xlabel(xlabel, fontsize=15)
+    ax.set_xlim(left=xlim[0], right=xlim[1])
+    
+
+def plot_param_recov_conf_matrix(df):
+    
+    f, axs = plt.subplots(1, 1, figsize=(7, 6))
+
+    # get Param names
+    param_names = df.columns[2::].tolist()
+
+    # Initialise matrices of nans
+    Nparam = len(param_names)
+    confusion_mat = np.empty((Nparam, Nparam))
+    confusion_mat[:] = np.NaN
+
+    # Store pearson correlations
+    for i_sim, param_sim_name in enumerate(param_names):
+        for i_fit, param_fit_name in enumerate(param_names):
+            param_sim_values = df[df['Type']=='Sim'][param_sim_name]
+            param_fit_values = df[df['Type']=='Fit'][param_fit_name]
+            corr, _ = pearsonr(param_sim_values, param_fit_values)
+            confusion_mat[i_sim, i_fit] = corr
+            #print('sim: ' + param_sim_name + ' fit: ' + param_fit_name)
+            #print(corr)
+
+    # Plot confusion matrix
+    ax = sns.heatmap(confusion_mat.T, vmin=-1, vmax=1, annot=True, annot_kws={"fontsize":12, "weight":"normal"}, cmap='coolwarm')
+    ax.set_xticklabels(param_names, fontsize = 12)
+    ax.set_yticklabels(param_names, fontsize = 12)
+    ax.set_xlabel('Simulated', fontsize = 14)
+    ax.set_ylabel('Fitted', fontsize = 14)
+    plt.show()
+
+
+def plot_param_recov_correlations(df):
+    
+    # get Param names
+    param_names = df.columns[2::].tolist()
+    
+    Nparam = len(param_names)
+
+    if Nparam<=3:
+        f, axs = plt.subplots(1, Nparam, figsize=(Nparam*6, 5))
+    elif Nparam==4:
+        f, axs = plt.subplots(2, 2, figsize=(2*6, 2*5))
+        axs = axs.reshape(-1)
+    else:
+        f, axs = plt.subplots(2, 3, figsize=(3*6, 2*5))
+        axs = axs.reshape(-1)
+
+    plt.subplots_adjust(hspace = 0.3)
+
+    for i, param in enumerate(param_names):
+
+        lims = [df[param].min().round(), df[param].max().round()]
+
+        df_tmp = df.pivot(index = 'simID', columns = 'Type', values=param)
+
+        plot_correlation(title=param, x='Fit', y='Sim', 
+                             data=df_tmp, ax=axs[i], text_pos=[.2,.8], 
+                             xlabel='Fitted', ylabel='Simulated', xlim=lims, ylim=lims)
+        
+    plt.show()
+    
+```
+    
+# Task
+4 different FBs = -5, -1, +1, +5 \
+Participants can either click after seeing the cue: 'Hit', or not do anything 'Miss'. In both cases they then see the reward but only recieve it if Hit. Frequencies of reward are cue-specific. \
+Cues = High Punishment (Cue_HP), Low Punishment (Cue_LP), Low Reward (Cue_LR), High Reward (Cue_HR) \
+N trials = `r py$Ntrials_total` (per cue = `r py$Ntrials_percue`) \
+N runs = 2 (`r py$Ntrials_total/2` trials per run, participants had a short break in between) \
+
+Reward frequencies:
+```{python, echo=FALSE}
+print(cue_freqs)
+```
+
+
+```{python, echo=FALSE, fig.align='center', out.width="50%", fig.cap = "Task information"}
+
+tmp_data_mean = all_counts.groupby('Cue').mean().reindex(['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR']);
+tmp_data_std = all_counts.groupby('Cue').std().reindex(['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR']);
+
+f, axs = plt.subplots(1, 1, figsize=(5, 5), dpi=80);
+
+x = np.arange(len(tmp_data_mean));
+bar_width = 0.15;
+bar_distance = 0.03;
+
+# Figure 1: reward recieved for each cue
+b1=axs.bar(x-3/2*(bar_width+bar_distance), tmp_data_mean['R_-5'], width=bar_width, color = 'red', alpha=0.6);
+b2=axs.bar(x-1/2*(bar_width+bar_distance), tmp_data_mean['R_-1'], width=bar_width, color = 'red', alpha=0.3);
+b3=axs.bar(x+1/2*(bar_width+bar_distance), tmp_data_mean['R_1'], width=bar_width, color = 'green', alpha=0.3);
+b4=axs.bar(x+3/2*(bar_width+bar_distance), tmp_data_mean['R_5'], width=bar_width, color = 'green', alpha=0.6);
+axs.set_xticks(x, tmp_data_mean.index, fontsize=14);
+axs.set_ylabel('Frequency', fontsize=16);
+axs.set_title('FB frequency by Cue', fontsize=18);
+axs.legend(['FB=-5', 'FB=-1', 'FB=1', 'FB=5'], fontsize=11);
+
+plt.show();
+```
+
+# Behaviour
+**Overall** \ 
+N participants = `r py$Npart`. 
+```{python, echo=FALSE, fig.align='center', out.width="70%", fig.cap = "Summary of Behaviour"}
+
+f, axs = plt.subplots(1, 1, figsize=(7, 5), dpi=80);
+pal = sns.color_palette(n_colors=1)
+
+# Figure 2: reward recieved for each cue = amount of Hits
+h1=axs.bar(x[0], tmp_data_mean.loc['Cue_HP']['Hits'], width=bar_width, color = pal, alpha=0.5);
+e1=axs.errorbar(x[0], tmp_data_mean.loc['Cue_HP']['Hits'], yerr=tmp_data_std.loc['Cue_HP']['Hits'], color='k', marker='s',linestyle='');
+
+h2=plt.bar(x[1], tmp_data_mean.loc['Cue_LP']['Hits'], width=bar_width, color = pal, alpha=0.5);
+e2=plt.errorbar(x[1], tmp_data_mean.loc['Cue_LP']['Hits'], yerr=tmp_data_std.loc['Cue_LP']['Hits'], color='k', marker='s',linestyle=''); 
+h3=plt.bar(x[2], tmp_data_mean.loc['Cue_LR']['Hits'], width=bar_width, color = pal, alpha=0.5);
+e3=plt.errorbar(x[2], tmp_data_mean.loc['Cue_LR']['Hits'], yerr=tmp_data_std.loc['Cue_LR']['Hits'], color='k', marker='s',linestyle='');
+
+h4=plt.bar(x[3], tmp_data_mean.loc['Cue_HR']['Hits'], width=bar_width, color = pal, alpha=0.5);
+e4=plt.errorbar(x[3], tmp_data_mean.loc['Cue_HR']['Hits'], yerr=tmp_data_std.loc['Cue_HR']['Hits'], color='k', marker='s',linestyle=''); 
+
+pt.half_violinplot(ax=axs, x="Cue", y="Hits", data=all_counts, order = ['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR'], palette = pal, bw = .2, cut = 0., scale = "area", width = .6, inner = None, orient = 'v')
+sns.stripplot(ax=axs, x="Cue", y="Hits", data=all_counts, order = ['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR'], palette = pal, edgecolor = "white", size = 4, jitter = 1, zorder = 0, orient = 'v', alpha=.4)
+
+axs.set_xlabel('');
+axs.set_xticks(x, tmp_data_mean.index, fontsize=14);
+axs.set_ylabel('Frequency', fontsize=16);
+axs.set_title('Mean Hit freq by Cue', fontsize=18);
+
+plt.show();
+```
+
+**Accross time** \
+Participant average: \
+Bump at the start of the 2nd run (each run is made of 56 trials) \
+t3 = $3*16$ = `r 3*16` trials \
+t4 = $4*16$ = `r 4*16` trials \
+
+```{python, echo=FALSE, fig.align='center', out.width="80%", fig.cap = "Behaviour accross time"}
+
+window_size = 16
+
+# Load hit_perc_per_t (data per timepoit)
+hit_perc_per_t = pd.read_pickle(all_users_folder + 'hit_perc_per_t/hit_perc_per_t_w' + str(window_size) + '.pkl');
+hit_perc_per_t.drop('ID', axis=1, inplace=True);
+
+# Timepoints
+N_trials = Ntrials_total
+N_iter = int(N_trials/window_size)
+timepoints = ['t'+ str(t+1) for t in range(N_iter)]
+
+# Compute stats
+stats_hits_perc_per_t = hit_perc_per_t.groupby('Code').agg(['mean', 'var']).T.swaplevel(axis=0);
+
+# Plot
+plt.figure(figsize=(10, 5), dpi=80)
+
+x = np.arange(len(timepoints))
+
+# Means
+m1=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HP'], 'o-', color='red', alpha=0.6);
+m2=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LP'], 'o-', color='red', alpha=0.3);
+m3=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LR'], 'o-', color='green', alpha=0.3);
+m4=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HR'], 'o-', color='green', alpha=0.6);
+
+# Variances
+v1m=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HP']-
+         stats_hits_perc_per_t.loc['var']['Cue_HP'], ':', color='red', alpha=0.6)
+v1p=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HP']+
+         stats_hits_perc_per_t.loc['var']['Cue_HP'], ':', color='red', alpha=0.6)
+
+v2m=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LP']-
+         stats_hits_perc_per_t.loc['var']['Cue_LP'], ':', color='red', alpha=0.3)
+v2p=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LP']+
+         stats_hits_perc_per_t.loc['var']['Cue_LP'], ':', color='red', alpha=0.3)
+
+v3m=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LR']-
+         stats_hits_perc_per_t.loc['var']['Cue_LR'], ':', color='green', alpha=0.3)
+v3p=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_LR']+
+         stats_hits_perc_per_t.loc['var']['Cue_LR'], ':', color='green', alpha=0.3)
+
+v4m=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HR']-
+         stats_hits_perc_per_t.loc['var']['Cue_HR'], ':', color='green', alpha=0.6)
+v4p=plt.plot(x, stats_hits_perc_per_t.loc['mean']['Cue_HR']+
+         stats_hits_perc_per_t.loc['var']['Cue_HR'], ':', color='green', alpha=0.6)
+
+
+plt.grid(axis='x', color='0.95');
+plt.legend(['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR'], loc ='best');
+plt.title('Hits by cue by timepoint\n (sliding average window = ' + str(window_size) + ' trials)', fontsize=20);
+
+plt.xlabel("Timepoint", fontsize=16);
+plt.xticks(x,timepoints);
+
+plt.ylabel("Percentage of hits", fontsize=16);
+plt.ylim((0,1));
+
+plt.show()
+```
+
+**Per Run** \
+Doesn't seem to be an overall difference between runs  \
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Behaviour by run"}
+
+# Load all counts_R
+all_counts_R = pd.read_pickle(all_users_folder + 'all_counts_R.pkl')
+
+# Compute number of hits and make new column
+all_counts_R['Hits'] = all_counts_R[['FB_-5', 'FB_-1', 'FB_1', 'FB_5']].sum(axis=1)
+
+# Compute stats
+tmp_data_mean = all_counts_R.groupby(['Cue', 'Run']).mean();
+tmp_data_std = all_counts_R.groupby(['Cue', 'Run']).std();
+
+# Figure
+f, axs = plt.subplots(1, 1, figsize=(7, 5), dpi=80);
+pal = sns.color_palette(n_colors=1)
+
+bar_width = 0.6
+n_runs = 2
+x = np.arange(len(tmp_data_mean)*n_runs)
+x_spaced = list(np.delete(x, np.arange(0, x.size, n_runs+1))) # remove every 3rd elemet (space between runs)
+
+group_by = n_runs
+x_grouped = [x_spaced[i:i + group_by] for i in range(0, len(x_spaced), group_by)]
+
+x_ticks = [sum(grp)/len(grp) for grp in x_grouped]
+
+cues = ['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR']
+runs = set([run for cue, run in tmp_data_mean.index])
+
+for i, cue in enumerate(cues):
+    l = axs.bar(x_grouped[i], tmp_data_mean.loc[cue]['Hits'], width=bar_width, color = ['g', 'k'], alpha=0.5);
+    axs.errorbar(x_grouped[i], tmp_data_mean.loc[cue]['Hits'], yerr=tmp_data_std.loc[cue]['Hits'], color='k', marker='s',linestyle='');
+
+axs.legend(l, ['Run ' + str(run) for run in runs], loc='upper left')
+axs.set_xticks(x_ticks[0:4], cues, fontsize=14);
+axs.set_title('Hit frequency per run', fontsize=18);
+axs.set_ylabel('Frequency', fontsize=16);
+
+plt.show()
+```
+
+**Per Block** \
+Pressing bias at the beginning of each run  \
+```{python, echo=FALSE, fig.align='center', out.width="80%", fig.cap = "Behaviour by run"}
+
+# Load all counts_B
+all_counts_B = pd.read_pickle(all_users_folder + 'all_counts_B.pkl')
+
+# Compute number of hits and make new column
+all_counts_B['Hits'] = all_counts_B[['FB_-5', 'FB_-1', 'FB_1', 'FB_5']].sum(axis=1)
+
+# Compute stats
+tmp_data_mean = all_counts_B.groupby(['Cue', 'Block']).mean();
+tmp_data_std = all_counts_B.groupby(['Cue', 'Block']).std();
+
+f, axs = plt.subplots(1, 1, figsize=(10, 5), dpi=80);
+pal = sns.color_palette(n_colors=1)
+
+bar_width = 0.6
+n_blocks = 8 
+n_blocks_per_run = int(n_blocks/2)
+x = np.arange(len(tmp_data_mean)*n_blocks)
+x_spaced = list(np.delete(x, np.arange(0, x.size, n_blocks+1))) # remove every xth elemet (space between runs)
+block_size = 112/n_blocks
+
+group_by = n_blocks
+x_grouped = [x_spaced[i:i + group_by] for i in range(0, len(x_spaced), group_by)]
+
+x_ticks = [sum(grp)/len(grp) for grp in x_grouped]
+
+cues = ['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR']
+blocks = set([block for cue, block in tmp_data_mean.index])
+
+for i, cue in enumerate(cues):
+    l = axs.bar(x_grouped[i], tmp_data_mean.loc[cue]['Hits'], color = list(n_blocks_per_run*'g'+n_blocks_per_run*'k'), width=bar_width, alpha=0.5);
+    axs.errorbar(x_grouped[i], tmp_data_mean.loc[cue]['Hits'], yerr=tmp_data_std.loc[cue]['Hits'], color='k', marker='s',linestyle='');
+
+axs.set_xticks(x_ticks[0:4], cues, fontsize=14);
+axs.set_title('Hit frequency per block (= ' + str(int(block_size)) + ' trials)', fontsize=18);
+axs.set_ylabel('Frequency', fontsize=16);
+axs.legend([l[0], l[n_blocks_per_run]], ['Run ' + str(run) for run in runs], loc = 'upper left')
+
+plt.show()
+
+```
+
+
+# Simulations 
+Plot softmax for different betas in a likely value range [-10,10] to know how to constrict the beta parameter in the model fitting. 
+```{python, echo=FALSE, fig.align='center', out.width="50%", fig.cap = "Softmax visualisation"}
+
+# Plot
+plt.figure(figsize=(6, 5), dpi=80)
+betas = np.arange(0,2,0.2)
+p=[]
+for i, beta in enumerate(betas):
+    vs = np.arange(-10,11,0.5)
+    xs = beta*vs  
+    p_hit =  np.exp(xs)/(np.exp(xs)+1)
+    p.append(plt.plot(vs, p_hit, color='blue', alpha=i/len(betas)))
+
+midle = round(len(betas)/2)
+plt.legend([p[1][0], p[midle][0], p[-1][0]], [betas[1], betas[midle], betas[-1]], title='Beta values')
+plt.xlabel('Hit value', fontsize=18)
+plt.ylabel('Hit probability', fontsize=18)
+plt.show()
+```
+
+```{python, echo=FALSE}
+
+# function plotting model parameters
+def plot_model_parameters(data_mod, param_names):
+    
+    Nparam = len(param_names)
+    
+    if Nparam<=3:
+        f, axs = plt.subplots(1, Nparam, figsize=(Nparam*6, 5))
+    elif Nparam==4:
+        f, axs = plt.subplots(2, 2, figsize=(2*6, 2*5))
+        axs = axs.reshape(-1)
+    else:
+        f, axs = plt.subplots(2, 3, figsize=(3*6, 2*5))
+        axs = axs.reshape(-1)
+        
+    plt.subplots_adjust(hspace = 0.3)
+        
+    pal = sns.color_palette(n_colors=1)
+
+    for ax, param in zip(axs, param_names):
+
+        y = data_mod[param].tolist()
+
+        # plot clouds
+        pt.half_violinplot(ax=ax, x = y, palette = pal, bw = .2, cut = 0., scale = "area", width = .6, inner = None, orient = 'h')
+
+        # add rain
+        sns.stripplot(ax=ax, x = y, palette = pal, edgecolor = "white", size = 5, jitter = 1, zorder = 0, orient = 'h', alpha=.35)
+
+        sns.boxplot(x = y, saturation=1, showfliers=False,
+                width=0.15, boxprops={'zorder': 3, 'facecolor': 'none'}, ax=ax)
+
+        # Makeup
+        ax.set_title('Parameter: ' + param, fontsize=18)
+        ax.set_xlabel('Best fit parameter value', fontsize=16)
+
+    plt.show()
+
+# function overlaying model predictions on behaviour
+def fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder):
+
+    # Timepoints
+    window_size = 16
+    N_trials = 112
+    timepoints = ['t'+ str(t+1) for t in range(int(N_trials/window_size))]
+
+    # Load behaviour and compute stats
+    hit_perc_per_t = pd.read_pickle(all_users_folder + 'hit_perc_per_t/hit_perc_per_t_w' + str(window_size) + '.pkl');
+    hit_perc_per_t.drop('ID', axis=1, inplace=True);
+    stats_hits_perc_per_t = hit_perc_per_t.groupby('Code').agg(['mean', 'var']).T.swaplevel(axis=0);
+
+    # Load model predictions and compute stats
+    ev_per_trial.drop('ID', axis=1, inplace=True);
+    stats_ev_per_trial = ev_per_trial.groupby('Cue').agg(['mean', 'var']).T.swaplevel(axis=0)
+    stats_ev_per_trial.columns = 'Cue_'+stats_ev_per_trial.columns
+
+    p_hit_per_trial.drop('ID', axis=1, inplace=True);
+    stats_p_hit_per_trial = p_hit_per_trial.groupby('Cue').agg(['mean', 'var']).T.swaplevel(axis=0)
+    stats_p_hit_per_trial.columns = 'Cue_'+stats_p_hit_per_trial.columns
+
+    # Plot
+    f, axs = plt.subplots(2, 1, figsize=(10, 6), dpi=100)
+    plt.subplots_adjust(hspace = 0.4)
+
+    x_mod = np.arange(len(stats_ev_per_trial.loc['mean']))+1
+    x_behav = np.arange(len(timepoints))*4+4
+
+    for cue, color, alpha in zip(['Cue_HP', 'Cue_LP', 'Cue_LR', 'Cue_HR'], ['red', 'red', 'green', 'green'], [0.6, 0.3, 0.3, 0.6]):
+        # Hit probabilites
+        m=axs[0].plot(x_mod, stats_p_hit_per_trial.loc['mean'][cue], '.-', color=color, alpha=alpha);
+        # Behaviour: sliding average
+        b=axs[0].plot(x_behav, stats_hits_perc_per_t.loc['mean'][cue], '.-', color='gray', alpha=alpha);
+        # Expected values
+        m=axs[1].plot(x_mod, stats_ev_per_trial.loc['mean'][cue], '.-', color=color, alpha=alpha);
+
+    for ax in axs:
+        ax.grid(axis='x', color='0.95');
+        ax.set_xticks(x_mod);
+    
+    axs[0].set_title('Model probability of hit', fontsize=16);
+    axs[1].set_title('Model expected values', fontsize=16);
+    
+    axs[0].set_ylabel("Hit [%]", fontsize=16);
+    axs[1].set_ylabel("Values", fontsize=16);
+    
+    axs[0].set_ylim([0,1]);
+    axs[1].set_ylim([-3,3]);
+    
+    axs[0].legend(b, {'Behaviour'})
+    
+    plt.show()
+    
+```
+
+\pagebreak
+
+# Functions
+
+Model glossary: $PE$ = prediction error, $FB$ = observed feedback (irrespective of hit), $V^{miss}$ = 0  \
+
+## Value functions 
+
+### Rescorla Wagner no V0 
+function name = rescorla_wagner_noV0\
+rescorla_wagner with fixed parameter: $V_0$ = 0 \
+
+### Rescorla Wagner reinitialising V0
+function name = rescorla_wagner\
+For each cue: \
+If t = 56: \
+$$ V_{t} = V_0 $$
+else: \
+$$ PE = FB_{t} - V_{t}^{hit} $$
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha \cdot PE $$
+
+### Rescorla Wagner 
+function name = rescorla_wagner\
+For each cue: \
+$$ PE = FB_{t} - V_{t}^{hit} $$
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha \cdot PE $$
+
+### Rescorla Wagner 2 learning rates
+function name = rescorla_wagner_2LR_FB\
+For each cue:
+$$ PE = FB_{t} - V_{t}^{hit} $$
+FB could take the following values: -5, -1, +1, +5 \
+Different learning rates for reward and punishment: \
+if $FB_t$ > 0:
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha_{rew} \cdot PE $$
+if $FB_t$ < 0:
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha_{pun} \cdot PE $$
+
+### Rescorla Wagner weighted FB
+function name = rescorla_wagner_weightRew\
+For each cue: \
+Scaling of feedback: \
+if abs($FB_t$) = 5: \
+$$ FB_{t} = w \cdot FB_{t} $$
+Prediction error: \
+$$ PE = FB_{t} - V_{t}^{hit} $$
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha \cdot PE $$
+
+### Rescorla Wagner shrinking learning rate
+function name = rescorla_wagner_shrinking_alpha\
+For each cue: \
+$$ PE = FB_{t} - V_{t}^{hit} $$
+Shrinking factor:
+$$ shrink = \frac{N_{trials} - t}{N_{trials}} $$
+With $N_{trials}=112$, and $t \in [1, 112]$
+\
+$$ V_{t+1}^{hit} = V_{t}^{hit} + \alpha_t \cdot shrink \cdot PE $$
+
+rescorla_wagner_reinitV0
+
+## Decision functions
+
+### Softmax
+function name = my_softmax\
+For each cue: 
+$$ p_{t}(hit) = \frac {e^{\beta \cdot V_{t}^{hit}}}{e^{\beta \cdot V_{t}^{hit}}+e^{\beta \cdot V^{miss}}} 
+= \frac{e^{\beta \cdot V_{t}^{hit}}}{e^{\beta \cdot V_{t}^{hit}}+1} $$ 
+
+### Softmax press bias 
+function name = my_softmax_press_bias\
+For each cue: 
+$$ p_{t}(hit) 
+= \frac{e^{\beta \cdot (V_{t}^{hit}+\pi)}}{e^{\beta \cdot (V_{t}^{hit}+\pi)}+e^{\beta \cdot V^{miss}}} 
+= \frac{e^{\beta \cdot (V_{t}^{hit}+\pi)}}{e^{\beta \cdot (V_{t}^{hit}+\pi)}+1} $$ 
+
+### Softmax shrinking press bias 
+function name = my_softmax_shrinking_press_bias\
+Shrinking factor: 
+$$ shrink = \frac{N_{run trials} - t_{run}}{N_{run trials}} $$
+With $N_{runtrials}=56$, and $t_{run} \in [1, 56]$ \
+\
+For each cue:
+$$ p_{t}(hit) = \frac{e^{\beta \cdot (V_{t}^{hit}+\pi_t \cdot shrink)}}{e^{\beta \cdot (V_{t}^{hit}+\pi_t \cdot shrink)}+e^{\beta \cdot V^{miss}}} = \frac{e^{\beta \cdot (V_{t}^{hit}+\pi_t \cdot shrink)}}{e^{\beta \cdot (V_{t}^{hit}+\pi_t \cdot shrink)}+1} $$ 
+
+\pagebreak
+
+# Models
+
+## Model 0: alpha, beta
+```{python}
+mod = 0
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature \
+Fixed parameter: $V_0 = 0$ \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="85%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 1: alpha, beta, v0
+```{python}
+mod = 1
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="100%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 2: alpha, beta, v0, pi
+```{python}
+mod = 2
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean, $\pi$ = press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 3: alpha_rew, alpha_pun, beta, v0
+```{python}
+mod = 3
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_{rew, pun}$ = learning rate for reward/punishment, $\beta$ = inverse temperature, $V_0$ = prior mean \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Stats on parameters**
+```{python, echo=TRUE}
+# Paired samples t-test
+stats.ttest_rel(data_mod_num['alpha_rew'], data_mod_num['alpha_pun'])
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 4: alpha, beta, v0, w
+```{python}
+mod = 4
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean, $\pi$ = press bias
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 5: alpha_t, beta, v0
+```{python}
+mod = 5
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_t$ = shrinking learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 6: alpha_rew, alpha_pun, beta, v0, pi_t
+```{python}
+mod = 6
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_{rew, pun}$ = learning rate for reward/punishment, $\beta$ = inverse temperature, $V_0$ = prior mean, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Stats on parameters**
+```{python, echo=TRUE}
+# Paired samples t-test
+stats.ttest_rel(data_mod_num['alpha_rew'], data_mod_num['alpha_pun'])
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 7: alpha, beta, v0, w, pi_t
+```{python}
+mod = 7
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean, $w$ = large FB weight, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 8: alpha_t, beta, v0, pi_t
+```{python} 
+mod = 8
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_t$ = shrinking learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 9: alpha, beta, v0, pi_t
+```{python}
+mod = 9
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha$ = learning rate, $\beta$ = inverse temperature, $V_0$ = prior mean, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 10: alpha_rew, alpha_pun, beta, pi_t
+```{python}
+mod = 10
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_{rew, pun}$ = learning rate for reward/punishment, $\beta$ = inverse temperature, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 11: alpha_t, beta, pi_t
+```{python}
+mod = 11
+mod_info = print_model_info(mod)
+```
+Free parameters: $\alpha_t$ = shrinking learning rate, $\beta$ = inverse temperature, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+## Model 12: alpha_t, beta, pi_t
+```{python}
+mod = 12
+mod_info = print_model_info(mod)
+```
+Free parameters: $V0r$ = reinitialising $V0$, $\alpha_t$ = shrinking learning rate, $\beta$ = inverse temperature, $\pi_t$ = shrinking press bias \
+\
+**Parameter fits**
+```{python}
+model_folder, data_mod, data_mod_num = print_model_stats(mod)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="65%", fig.cap = "Model parameters"}
+plot_model_parameters(data_mod, mod_info['param_names'])
+```
+```{python, echo=FALSE, fig.align='center', out.width="60%", fig.cap = "Model predictions"}
+ev_per_trial = pd.read_pickle(model_folder + 'mod_ev_per_trial.pkl');
+p_hit_per_trial = pd.read_pickle(model_folder + 'mod_p_hit_per_trial.pkl');
+fig_modelpred_on_behav(ev_per_trial, p_hit_per_trial, all_users_folder)
+```
+\pagebreak
+
+# Model comparison
+
+**Formulas** \
+\
+$$ BIC = 2 \cdot nLL + Nparams \cdot ln(Ntrials) $$
+$$ AIC = 2 \cdot nLL + 2 \cdot Nparams $$
+With: nLL = negative log likelihood \
+$$\\[.01in]$$
+
+**Results** \
+
+```{python echo=FALSE}
+# Load data
+nLLs_concat = pd.read_pickle(all_users_folder + 'nLLs_concat.pkl')
+win_mod_counts_df = pd.read_pickle(all_users_folder + 'win_mod_counts.pkl')
+
+# print table
+bic_aic_means = nLLs_concat.groupby('model').mean()
+tab = bic_aic_means.style.highlight_min(color = 'lightblue', subset = ['nLL', 'BIC', 'AIC'], axis =0).format({'Ntrials':"{:.0f}",'Nparams':"{:.0f}"}).set_properties(subset=['Ntrials', 'Nparams'], **{'width':'80px', 'text-align':'center'}).set_properties(subset=['nLL', 'BIC' ,'AIC'], **{'width':'100px', 'text-align':'center'}).set_table_attributes('style="margin-left:auto;margin-right:auto;"');
+tab
+```
+
+
+
+```{python, echo=FALSE, fig.align='center', out.width="80%", fig.cap = "Model comparison"}
+fig, axs = plt.subplots(2, 2, figsize=(20,12), facecolor='white', dpi=100)
+
+pal = sns.color_palette(n_colors=1)
+
+mod_strings = ['m' + str(mod_num) for mod_num in win_mod_counts_df['model']]
+bic_aic_stats = nLLs_concat.groupby('model').agg({'BIC':['mean','std'], 'AIC':['mean','std']})
+
+for ax, criterion in zip([axs[0][0], axs[0][1]], ['BIC', 'AIC']):
+    pt.half_violinplot(ax = ax, x = 'model',  y = criterion, data = nLLs_concat, palette = pal, bw = .2, cut = 0., scale = "area", width = .7, inner = None, alpha=0.9)
+    sns.stripplot(ax = ax, x = 'model',  y = criterion, data = nLLs_concat, palette = pal, edgecolor = "white", size = 4, jitter = 1, zorder = 0, alpha=.35)
+    ax.bar(x = bic_aic_stats.index,  height = bic_aic_stats[criterion]['mean'], width=.3, color = pal, alpha=0.5);
+    ax.errorbar(x = bic_aic_stats.index, y = bic_aic_stats[criterion]['mean'], yerr=bic_aic_stats[criterion]['std'], color='k', marker='s',linestyle='');
+
+    ax.set_title(criterion + ' average', fontsize=16)
+    ax.set_ylabel(criterion, fontsize=16)
+    ax.set_xlabel('', fontsize=16)
+    #ax.set_ylim([nLLs_concat[criterion].min()-1, nLLs_concat[criterion].max()+1])
+    ax.set_ylim([nLLs_concat[criterion].min()-1, 180])
+    ax.set_xticks(win_mod_counts_df['model'])
+    ax.set_xticklabels(mod_strings, fontsize=11)
+    
+    # indicate winning model
+    id_min = bic_aic_stats[criterion]['mean'].idxmin()
+    ax.get_xticklabels()[id_min].set_weight('bold')
+    
+for ax, criterion in zip([axs[1][0], axs[1][1]], ['BIC', 'AIC']):
+    
+    bars = ax.bar(x = win_mod_counts_df['model'],  height = win_mod_counts_df[criterion], width=0.5, color = pal, alpha=0.5)
+    ax.bar_label(bars, fontsize=14) # displays the values
+    
+    ax.set_title(criterion + ' per head', fontsize=16)
+    ax.set_ylabel('Participant count', fontsize=16)
+    ax.set_ylim([0, math.ceil((win_mod_counts_df.values.max()+3)/10)*10])
+    ax.set_xticks(win_mod_counts_df['model'])
+    ax.set_xticklabels(mod_strings, fontsize=11)
+    
+    # indicate winning model
+    ids_max = win_mod_counts_df[win_mod_counts_df[criterion]==win_mod_counts_df[criterion].max()].index.values
+    for id_max in ids_max:
+        ax.get_xticklabels()[id_max].set_weight('bold') 
+    ax.get_xticklabels()[id_max].set_weight('bold') 
+        
+plt.show()
+```
+
+
+# Compare mod8 and mod9
+```{python, echo=FALSE}
+# Mod8
+model_folder = all_users_folder + 'mod8/'
+data_mod8 = pd.read_pickle(model_folder+'mod_param_fits.pkl')
+mod8_info = pd.read_pickle(model_folder+'mod_parameters.pkl')
+# Mod9
+model_folder = all_users_folder + 'mod9/'
+data_mod9 = pd.read_pickle(model_folder+'mod_param_fits.pkl')
+mod9_info = pd.read_pickle(model_folder+'mod_parameters.pkl')
+# Specify model in column names
+data_mod8.columns = [str(col) + '_mod8' for col in data_mod8.columns]
+data_mod9.columns = [str(col) + '_mod9' for col in data_mod9.columns]
+# Concat
+df = pd.concat([data_mod8, data_mod9], axis=1)
+df.drop(['Ntrials_mod8', 'Ntrials_mod9', 'Nparams_mod8' ,'Nparams_mod9', 'ID_mod9'], axis=1, inplace=True)
+df.rename(columns={'ID_mod8': 'ID', 'alpha_t_mod8': 'alpha_mod8'}, inplace=True)
+df = df.apply(pd.to_numeric)
+# describe
+print(df.iloc[:,1:6].describe())
+print(df.iloc[:,6::].describe())
+# Convert to wide
+dfw = pd.wide_to_long(df, stubnames=['nLL', 'alpha', 'beta', 'pi_t', 'v0'], i="ID", j="model", sep='_', suffix=r'\w+')
+param_names = dfw.columns.tolist()
+dfw.sort_index(inplace=True)
+dfw.reset_index(inplace=True)
+```
+**Plots**
+```{python, echo=FALSE, fig.align='center', out.width="50%", fig.cap = "Likelihoods"}
+
+# Likelihoods
+f, ax1 = plt.subplots(1, 1, figsize=(6, 5))
+param = param_names[0]
+pt.half_violinplot(ax=ax1, x="model", y=param, data=dfw, palette = pal, bw = .2, cut = 0., scale = "area", width = .6, inner = None, orient = 'v')
+sns.stripplot(ax=ax1, x="model", y=param, data=dfw, palette = pal, edgecolor = "white", size = 4, jitter = 1, zorder = 0, orient = 'v', alpha=.4)
+sns.boxplot(ax=ax1, x="model", y=param, data=dfw, saturation=1, showfliers=False, width=0.15, boxprops={'zorder': 3, 'facecolor': 'none'})
+
+# Makeup
+ax1.set_title('Parameter: ' + param, fontsize=18)
+ax1.set_ylabel('Best fit parameter value', fontsize=16)
+ax1.set_xticklabels(['mod8', 'mod9'], fontsize=16)
+ax1.set_xlabel('')
+    
+plt.show()
+```
+
+```{python, echo=FALSE, fig.align='center', out.width="70%", fig.cap = "Parameters"}
+# Parameters
+f, axs = plt.subplots(2, 2, figsize=(2*6, 2*5))
+axs = axs.reshape(-1)
+plt.subplots_adjust(hspace = 0.3)
+pal = sns.color_palette(n_colors=1)
+    
+for ax, param in zip(axs, param_names[1::]):
+    pt.half_violinplot(ax=ax, x="model", y=param, data=dfw, palette = pal, bw = .2, cut = 0., scale = "area", width = .6, inner = None, orient = 'v')
+    sns.stripplot(ax=ax, x="model", y=param, data=dfw, palette = pal, edgecolor = "white", size = 4, jitter = 1, zorder = 0, orient = 'v', alpha=.4)
+    sns.boxplot(ax=ax, x="model", y=param, data=dfw, saturation=1, showfliers=False, width=0.15, boxprops={'zorder': 3, 'facecolor': 'none'})
+    
+    # Makeup
+    ax.set_title('Parameter: ' + param, fontsize=18)
+    ax.set_ylabel('Best fit parameter value', fontsize=16)
+    ax.set_xticklabels(['mod8', 'mod9'], fontsize=16)
+    ax.set_xlabel('')
+
+axs[0].set_title('Parameter: alpha_t, alpha', fontsize=18)
+plt.show()
+```
+**Stats: t-tests**
+$$V_0:$$ 
+```{python, echo=FALSE}
+param = 'v0'
+print('mod8: ', stats.ttest_1samp(df[param + '_mod8'], 0))
+print('mod9: ', stats.ttest_1samp(df[param + '_mod9'], 0))
+```
+
+**Stats: paired t-tests**
+```{python, echo=FALSE}
+# Paired samples t-test
+for param in param_names:
+    print(param + ':')
+    print('means:')
+    print('mod8: ', np.mean(df[param + '_mod8']))
+    print('mod9: ', np.mean(df[param + '_mod9']))
+    print('normality asumption:')
+    print('mod8: ', stats.shapiro(df[param + '_mod8']))
+    print('mod9: ', stats.shapiro(df[param + '_mod9']))
+    print('paired t-test:')
+    print(stats.ttest_rel(df[param + '_mod8'], df[param + '_mod9']))
+    print('Wilcoxon:')
+    print(stats.wilcoxon(df[param + '_mod8'], df[param + '_mod9']))
+    print('\n')
+```
+
+# Parameter recovery
+
+**Simulation**
+\
+Parameter values for simulation sampled from fitted parameter values (numpy.random.normal function):
+$$ param \sim \mathcal{N}(mean, \, std) $$
+\
+Dataset was randomly chosen from the `r py$Npart` datasets (random.suffle function).
+\
+
+## Model 8 
+```{python, echo=FALSE}
+mod = 8
+
+# Get data
+sim_refit_file = all_users_folder + 'sim_refit/model' + str(mod) + '_v0_5_beta_10_pi_5.pkl'
+df = pd.read_pickle(sim_refit_file)
+Nsim = len(df[df['Type']=='Sim'])
+
+# Model settings
+mod_info = print_model_info(mod)
+
+# Load fitted param info
+data_mod = pd.read_pickle(all_users_folder + 'mod' + str(mod) + '/mod_param_fits.pkl')
+parameter_means = data_mod[mod_info['param_names']].mean()
+parameter_stds = data_mod[mod_info['param_names']].std()
+```
+N sim = `r py$Nsim`
+Simulation parameter values: 
+```{python, echo=FALSE}
+# mean and std
+data_mod_num = data_mod.apply(pd.to_numeric)
+data_mod_num = data_mod_num.drop(['ID', 'nLL', 'Ntrials', 'Nparams'], axis=1).describe()
+print(data_mod_num.loc[['mean', 'std']])
+```
+\
+**Plots**
+\
+```{python, echo=FALSE, fig.align='center', out.width="50%", fig.cap = "Confusion matrix mod8"}
+df = pd.read_pickle(sim_refit_file)
+plot_param_recov_conf_matrix(df)
+```
+```{python, echo=FALSE, fig.align='center', out.width="70%", fig.cap = "Conrrelations Model 8"}
+df = pd.read_pickle(sim_refit_file)
+plot_param_recov_correlations(df)
+```
+
+## Model 9 
+\
+```{python, echo=FALSE}
+mod = 9
+
+# Get data
+sim_refit_file = all_users_folder + 'sim_refit/model' + str(mod) + '_v0_5_beta_10_pi_5.pkl'
+df = pd.read_pickle(sim_refit_file)
+Nsim = len(df[df['Type']=='Sim'])
+
+# Model settings
+mod_info = print_model_info(mod)
+
+# Load fitted param info
+data_mod = pd.read_pickle(all_users_folder + 'mod' + str(mod) + '/mod_param_fits.pkl')
+parameter_means = data_mod[mod_info['param_names']].mean()
+parameter_stds = data_mod[mod_info['param_names']].std()
+```
+N sim = `r py$Nsim`
+Simulation parameter values: 
+```{python, echo=FALSE}
+# mean and std
+data_mod_num = data_mod.apply(pd.to_numeric)
+data_mod_num = data_mod_num.drop(['ID', 'nLL', 'Ntrials', 'Nparams'], axis=1).describe()
+print(data_mod_num.loc[['mean', 'std']])
+```
+\
+**Plots**
+\
+```{python, echo=FALSE, fig.align='center', out.width="50%", fig.cap = "Confusion matrix Model 9"}
+df = pd.read_pickle(sim_refit_file)
+plot_param_recov_conf_matrix(df)
+```
+```{python, echo=FALSE, fig.align='center', out.width="70%", fig.cap = "Conrrelations mod9"}
+df = pd.read_pickle(sim_refit_file)
+plot_param_recov_correlations(df)
+```
